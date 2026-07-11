@@ -249,11 +249,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config = config.with_user_agent(user_agent);
     }
 
-    // Create the wallet manager
+    // Create the wallet manager. Use --start-height as the wallet's birth
+    // height when given: a birth of 0 combined with a checkpoint-anchored
+    // scan start leaves the wallet's synced_height permanently non-contiguous
+    // with the first scannable batch, which the #649 contiguity guard then
+    // refuses to advance — wedging the tick into an endless restart loop.
+    let birth_height = match config.start_from_height {
+        Some(h) if h != u32::MAX => h,
+        _ => 0,
+    };
     let mut wallet_manager = WalletManager::<ManagedWalletInfo>::new(config.network);
     wallet_manager.create_wallet_from_mnemonic(
         mnemonic_phrase.as_str(),
-        0,
+        birth_height,
         key_wallet::wallet::initialization::WalletAccountCreationOptions::default(),
     )?;
     let wallet = Arc::new(tokio::sync::RwLock::new(wallet_manager));
