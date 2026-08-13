@@ -30,6 +30,8 @@ pub struct MockWallet {
     addresses: Vec<Address>,
     /// Outpoints returned by watched_outpoints.
     outpoints: Vec<OutPoint>,
+    /// UTXO scripts returned by watched_utxo_script_pubkeys_for.
+    utxo_script_pubkeys: Vec<ScriptBuf>,
     /// Net amount returned by process_mempool_transaction.
     mempool_net_amount: i64,
     /// Addresses returned by process_mempool_transaction.
@@ -64,6 +66,7 @@ impl MockWallet {
             mempool_relevant: false,
             addresses: Vec::new(),
             outpoints: Vec::new(),
+            utxo_script_pubkeys: Vec::new(),
             mempool_net_amount: 0,
             mempool_addresses: Vec::new(),
             mempool_new_addresses: Vec::new(),
@@ -92,6 +95,12 @@ impl MockWallet {
     /// Set the outpoints returned by watched_outpoints.
     pub fn set_outpoints(&mut self, outpoints: Vec<OutPoint>) {
         self.outpoints = outpoints;
+        self.monitor_revision += 1;
+    }
+
+    /// Set the UTXO scripts returned by watched_utxo_script_pubkeys_for.
+    pub fn set_utxo_script_pubkeys(&mut self, scripts: Vec<ScriptBuf>) {
+        self.utxo_script_pubkeys = scripts;
         self.monitor_revision += 1;
     }
 
@@ -191,6 +200,14 @@ impl WalletInterface for MockWallet {
 
     fn watched_outpoints(&self) -> Vec<OutPoint> {
         self.outpoints.clone()
+    }
+
+    fn watched_utxo_script_pubkeys_for(&self, wallet_id: &WalletId) -> Vec<ScriptBuf> {
+        if wallet_id == &self.wallet_id {
+            self.utxo_script_pubkeys.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     fn last_processed_height(&self) -> CoreBlockHeight {

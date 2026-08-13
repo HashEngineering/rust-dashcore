@@ -208,3 +208,85 @@ fn multiple_transactions_all_inputs_tracked_after_round_trip() {
     assert!(all_spent.contains(&outpoint_3));
     assert_eq!(all_spent.len(), 3);
 }
+
+/// A confirmed "drain" — a transaction that spends the wallet's UTXOs and pays
+/// only an external destination plus a zero-value OP_RETURN memo, leaving NO
+/// wallet-owned output (the shape a MAX Maya sell produces) — must remove
+/// every consumed UTXO and settle the balance to zero once its block is
+/// processed. Regression test for the permanently over-reported balance after
+/// mainnet tx a5c99aec2d535f71c1f65a12b1d893f0c3a53a9b252bf8335a941639cddac873
+/// (block 2517981), which consumed 7,443,157 duffs across two inputs while the
+/// wallet kept counting them.
+#[tokio::test]
+async fn confirmed_drain_with_no_wallet_output_settles_balance() {
+    use dashcore::blockdata::script::ScriptBuf;
+    use dashcore::TxOut;
+
+    // Fund the wallet with two UTXOs, mirroring the two inputs the real drain
+    // consumed (7,000,000 + 443,157 duffs).
+    let (mut ctx, funding_1) = TestWalletContext::new_random().with_mempool_funding(7_000_000).await;
+    let funding_2 = Transaction::dummy(&ctx.receive_address, 1..2, &[443_157]);
+    let result = ctx.check_transaction(&funding_2, TransactionContext::Mempool).await;
+    assert!(result.is_relevant);
+
+    let outpoint_1 = OutPoint::new(funding_1.txid(), 0);
+    let outpoint_2 = OutPoint::new(funding_2.txid(), 0);
+    {
+        let account = ctx.managed_wallet.first_bip44_managed_account().expect("BIP44 account");
+        assert!(account.utxos.contains_key(&outpoint_1));
+        assert!(account.utxos.contains_key(&outpoint_2));
+    }
+    assert_eq!(ctx.managed_wallet.balance.total(), 7_443_157);
+
+    // The drain: both wallet UTXOs in, destination at vout 0, zero-value
+    // OP_RETURN memo at vout 1, no change — no wallet-owned script anywhere.
+    let destination = dashcore::Address::p2pkh(
+        &dashcore::PublicKey::from_slice(&[0x02; 33]).expect("pubkey"),
+        dashcore::Network::Testnet,
+    );
+    let drain = Transaction {
+        version: 2,
+        lock_time: 0,
+        input: vec![
+            TxIn {
+                previous_output: outpoint_1,
+                ..Default::default()
+            },
+            TxIn {
+                previous_output: outpoint_2,
+                ..Default::default()
+            },
+        ],
+        output: vec![
+            TxOut {
+                value: 7_443_157 - 1_000,
+                script_pubkey: destination.script_pubkey(),
+            },
+            TxOut {
+                value: 0,
+                script_pubkey: ScriptBuf::new_op_return(b"=:MAYA.CACAO:memo"),
+            },
+        ],
+        special_transaction_payload: None,
+    };
+
+    // The drain's block arrives (the compact-filter fix guarantees it now
+    // matches via the spent prevouts' scripts). Processing it must flip the
+    // inputs to spent.
+    let block = BlockInfo::new(2_517_981, BlockHash::from_slice(&[9u8; 32]).expect("hash"), 1_754_000_000);
+    let drain_res = ctx.check_transaction(&drain, TransactionContext::InBlock(block)).await;
+    assert!(drain_res.is_relevant, "a drain spending our UTXOs is relevant despite paying us nothing");
+
+    let account = ctx.managed_wallet.first_bip44_managed_account().expect("BIP44 account");
+    assert!(!account.utxos.contains_key(&outpoint_1), "first drained input must leave the UTXO set");
+    assert!(!account.utxos.contains_key(&outpoint_2), "second drained input must leave the UTXO set");
+    assert_eq!(
+        ctx.managed_wallet.balance.total(),
+        0,
+        "the drained inputs must stop counting toward the balance"
+    );
+
+    // The drain is recorded as an outgoing transaction in history.
+    let record = account.transactions().get(&drain.txid()).expect("drain recorded in history");
+    assert_eq!(record.net_amount, -(7_443_157i64), "the full consumed value flows out");
+}

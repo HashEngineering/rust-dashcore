@@ -241,6 +241,15 @@ impl<T: WalletInfoInterface + Send + Sync + 'static> WalletInterface for WalletM
         self.watched_outpoints()
     }
 
+    fn watched_utxo_script_pubkeys_for(&self, wallet_id: &WalletId) -> Vec<ScriptBuf> {
+        self.wallet_infos
+            .get(wallet_id)
+            .map(|info| {
+                info.utxos().into_iter().map(|utxo| utxo.txout.script_pubkey.clone()).collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn monitor_revision(&self) -> u64 {
         self.monitor_revision()
     }

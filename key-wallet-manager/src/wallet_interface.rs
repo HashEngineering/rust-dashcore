@@ -104,6 +104,25 @@ pub trait WalletInterface: Send + Sync + 'static {
     /// Used for bloom filter construction to detect spends of our UTXOs.
     fn watched_outpoints(&self) -> Vec<OutPoint>;
 
+    /// Get the scriptPubKeys of the UTXOs held by `wallet_id`, so blocks
+    /// spending them can be matched during compact-filter scanning.
+    ///
+    /// Dash Core inserts each input's prevout scriptPubKey (from undo data)
+    /// into a block's BIP158 compact filter alongside the outputs' scripts.
+    /// A transaction that spends the wallet's UTXOs but pays no wallet-owned
+    /// output — e.g. a full drain whose only outputs are an external
+    /// destination and an OP_RETURN memo — is therefore only visible in the
+    /// filter through those prevout scripts. Watching each UTXO's script
+    /// directly (rather than relying on the monitored address set alone)
+    /// guarantees the spend's block matches regardless of the transaction's
+    /// outputs, mirroring the outpoint watching the BIP37 bloom path does.
+    ///
+    /// The default returns an empty set for implementations that do not
+    /// track UTXOs.
+    fn watched_utxo_script_pubkeys_for(&self, _wallet_id: &WalletId) -> Vec<ScriptBuf> {
+        Vec::new()
+    }
+
     /// Return the earliest block height that should be scanned for this wallet on the
     /// specified network. Implementations can use the wallet's birth height or other
     /// metadata to provide a more precise rescan starting point.

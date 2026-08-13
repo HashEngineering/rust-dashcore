@@ -257,6 +257,64 @@ mod tests {
         assert!(with_element.contains(&key), "bare-element query must match");
     }
 
+    /// A "drain" transaction spends wallet UTXOs and pays only an external
+    /// destination plus a zero-value OP_RETURN — no wallet-owned output. Its
+    /// block's compact filter therefore carries no monitored *output* script;
+    /// the spend is only visible through the spent prevouts' scriptPubKeys,
+    /// which Dash Core inserts from undo data. A query that watches the
+    /// wallet's UTXO scripts must match the block; a query without them (the
+    /// pre-fix behaviour when the UTXO's script is absent from the monitored
+    /// set) misses it and the spend is never confirmed.
+    #[test]
+    fn test_drain_block_matches_via_watched_utxo_script() {
+        // The wallet's UTXO sits on this script; the drain spends it.
+        let utxo_address = Address::dummy(Network::Regtest, 1);
+        let utxo_script = utxo_address.script_pubkey();
+
+        // The drain: destination at vout 0, zero-value OP_RETURN at vout 1.
+        let destination = Address::dummy(Network::Regtest, 99);
+        let mut drain = Transaction::dummy(&destination, 0..1, &[7_443_157 - 1_000]);
+        drain.output.push(dashcore::TxOut {
+            value: 0,
+            script_pubkey: ScriptBuf::new_op_return(b"=:MAYA.CACAO:memo"),
+        });
+        // A coinbase so the drain is not the block's first transaction
+        // (BlockFilterWriter::add_input_scripts skips the coinbase).
+        let coinbase = Transaction::dummy_coinbase(&Address::dummy(Network::Regtest, 50), 500);
+        let block = Block::dummy(2_517_981, vec![coinbase, drain]);
+
+        // Build the filter the way a Dash Core peer does: output scripts
+        // (OP_RETURN excluded) plus each input's prevout script from undo data.
+        let mut content = Vec::new();
+        {
+            let mut writer = BlockFilterWriter::new(&mut content, &block);
+            writer.add_output_scripts();
+            writer
+                .add_input_scripts(|_| Ok::<_, dashcore::bip158::Error>(utxo_script.clone()))
+                .unwrap();
+            writer.finish().expect("finish filter");
+        }
+        let filter = BlockFilter::new(&content);
+        let key = FilterMatchKey::new(2_517_981, block.block_hash());
+
+        let mut input = HashMap::new();
+        input.insert(key.clone(), filter);
+
+        // Monitored scripts that do not include the UTXO's script miss the
+        // block: none of the drain's outputs is wallet-owned.
+        let other_wallet_scripts = scripts_for(&[Address::dummy(Network::Regtest, 7)]);
+        let without_utxo =
+            check_compact_filters_for_elements(&input, &other_wallet_scripts, &[], 0);
+        assert!(!without_utxo.contains(&key), "scripts-only query must miss the drain block");
+
+        // Watching the UTXO's script alongside the monitored scripts matches
+        // the drain block via its prevout element.
+        let mut with_utxo_scripts = other_wallet_scripts;
+        with_utxo_scripts.push(utxo_script.clone());
+        let with_utxo = check_compact_filters_for_elements(&input, &with_utxo_scripts, &[], 0);
+        assert!(with_utxo.contains(&key), "watched-UTXO-script query must match the drain block");
+    }
+
     /// A wallet that owns a masternode's 1000-DASH collateral output but not
     /// its owner/voting keys sees a compact filter that carries the
     /// `ProRegTx`'s `collateralOutpoint` as a bare 36-byte consensus-serialized

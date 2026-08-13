@@ -838,7 +838,20 @@ impl<H: BlockHeaderStorage, FH: FilterHeaderStorage, F: FilterStorage, W: Wallet
         let mut wallet_states: Vec<WalletScanState> = Vec::new();
         for wallet_id in &behind {
             let synced = wallet.wallet_synced_height(wallet_id);
-            let scripts = wallet.monitored_script_pubkeys_for(wallet_id);
+            let mut scripts = wallet.monitored_script_pubkeys_for(wallet_id);
+            // Also watch the scripts of the wallet's own UTXOs so spends of
+            // them match their block. Dash Core inserts each input's prevout
+            // scriptPubKey into the compact filter, so this catches a
+            // transaction that spends our UTXOs but pays no wallet-owned
+            // output (e.g. a full drain to an external destination plus an
+            // OP_RETURN) — such a transaction is invisible to the monitored
+            // script set above, which only its outputs could match. Mirrors
+            // the outpoint watching the mempool bloom filter does.
+            let utxo_scripts = wallet.watched_utxo_script_pubkeys_for(wallet_id);
+            if !utxo_scripts.is_empty() {
+                let known: HashSet<ScriptBuf> = scripts.iter().cloned().collect();
+                scripts.extend(utxo_scripts.into_iter().filter(|s| !known.contains(s)));
+            }
             // Bare owner/voting key hashes a compact filter carries beyond the
             // wallet's scriptPubKeys.
             let elements = wallet.monitored_filter_elements_for(wallet_id);
@@ -1770,6 +1783,99 @@ mod tests {
         let attr_70 = blocks.get(&key_70).expect("entry for height 70");
         assert!(attr_70.contains(&wallet_low));
         assert!(!attr_70.contains(&wallet_high));
+    }
+
+    /// Build a Dash-Core-faithful `BlockFilter` for a block containing a
+    /// "drain" transaction: it spends a UTXO whose script is `utxo_script`
+    /// and pays only an external destination plus a zero-value OP_RETURN —
+    /// no wallet-owned output. The filter carries the block's output scripts
+    /// (OP_RETURN excluded) plus each input's prevout script from undo data,
+    /// exactly as Dash Core's `BasicFilterElements` builds it.
+    fn filter_for_drain_spending(
+        height: u32,
+        utxo_script: &dashcore::ScriptBuf,
+    ) -> (FilterMatchKey, BlockFilter) {
+        let destination = dashcore::Address::dummy(Network::Regtest, 99);
+        let mut drain = Transaction::dummy(&destination, 0..1, &[7_443_157 - 1_000]);
+        drain.output.push(dashcore::TxOut {
+            value: 0,
+            script_pubkey: dashcore::ScriptBuf::new_op_return(b"=:MAYA.CACAO:memo"),
+        });
+        let coinbase =
+            Transaction::dummy_coinbase(&dashcore::Address::dummy(Network::Regtest, 50), 500);
+        let block = Block::dummy(height, vec![coinbase, drain]);
+
+        let mut content = Vec::new();
+        {
+            let mut writer = dashcore::bip158::BlockFilterWriter::new(&mut content, &block);
+            writer.add_output_scripts();
+            writer
+                .add_input_scripts(|_| Ok::<_, dashcore::bip158::Error>(utxo_script.clone()))
+                .expect("add prevout scripts");
+            writer.finish().expect("finish filter");
+        }
+        (FilterMatchKey::new(height, block.block_hash()), BlockFilter::new(&content))
+    }
+
+    /// A block whose only wallet-relevant transaction is a drain — spending
+    /// the wallet's UTXO with no wallet-owned output — must be matched by
+    /// `scan_batch` through the watched UTXO scripts, and missed without
+    /// them. Regression test for the confirmed Maya drain whose block never
+    /// matched, leaving its inputs unspent and the balance over-reported
+    /// (mainnet tx a5c99aec…c873, block 2517981).
+    #[tokio::test]
+    async fn test_scan_batch_matches_drain_block_via_watched_utxo_scripts() {
+        let utxo_address = dashcore::Address::dummy(Network::Regtest, 1);
+        let utxo_script = utxo_address.script_pubkey();
+        let (key, filter) = filter_for_drain_spending(30, &utxo_script);
+
+        // Without watched UTXO scripts (pre-fix behaviour) the drain block
+        // must not match: no monitored script appears in the drain's outputs.
+        let mut manager = create_test_manager().await;
+        manager.set_state(SyncState::Syncing);
+        let mut filters: HashMap<FilterMatchKey, BlockFilter> = HashMap::new();
+        filters.insert(key.clone(), filter.clone());
+        let mut batch = FiltersBatch::new(0, 99, filters.clone());
+        batch.mark_verified();
+        manager.active_batches.insert(0, batch);
+        manager.progress.update_stored_height(99);
+        {
+            // An unrelated monitored address so the wallet has a non-empty
+            // script set; still no match against the drain block.
+            let mut w = manager.wallet.write().await;
+            w.set_addresses(vec![dashcore::Address::dummy(Network::Regtest, 7)]);
+        }
+        let events = manager.scan_batch(0).await.unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, SyncEvent::BlocksNeeded { .. })),
+            "a drain block must not match on monitored scripts alone"
+        );
+
+        // With the wallet's UTXO script watched, the same batch matches and
+        // the block is requested for the wallet.
+        let mut manager = create_test_manager().await;
+        manager.set_state(SyncState::Syncing);
+        let mut batch = FiltersBatch::new(0, 99, filters);
+        batch.mark_verified();
+        manager.active_batches.insert(0, batch);
+        manager.progress.update_stored_height(99);
+        {
+            let mut w = manager.wallet.write().await;
+            w.set_addresses(vec![dashcore::Address::dummy(Network::Regtest, 7)]);
+            w.set_utxo_script_pubkeys(vec![utxo_script.clone()]);
+        }
+        let events = manager.scan_batch(0).await.unwrap();
+        let blocks = events
+            .iter()
+            .find_map(|e| match e {
+                SyncEvent::BlocksNeeded {
+                    blocks,
+                } => Some(blocks),
+                _ => None,
+            })
+            .expect("watched UTXO scripts must surface the drain block as BlocksNeeded");
+        let attribution = blocks.get(&key).expect("entry for the drain block");
+        assert!(attribution.contains(&MOCK_WALLET_ID), "the spend attributes to the owning wallet");
     }
 
     /// `rescan_batch` with multiple wallets in `scripts_by_wallet`:
