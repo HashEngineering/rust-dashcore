@@ -1031,7 +1031,17 @@ impl ManagedAccountCollection {
             for pool in account.managed_account_type_mut().address_pools_mut() {
                 let pool_type = pool.pool_type;
                 match pool.probe_gap_limit(probe_gap, &key_source) {
-                    Ok(infos) => derived.extend(infos),
+                    Ok(infos) => {
+                        tracing::info!(
+                            "Probe pool {:?}/{:?}: highest_used={:?} highest_generated={:?} derived {}",
+                            to_check,
+                            pool_type,
+                            pool.highest_used,
+                            pool.highest_generated,
+                            infos.len(),
+                        );
+                        derived.extend(infos)
+                    }
                     Err(e) => {
                         tracing::error!(
                             account_type = ?to_check,

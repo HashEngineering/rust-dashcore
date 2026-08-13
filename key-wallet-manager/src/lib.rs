@@ -94,6 +94,10 @@ pub struct CheckTransactionsResult {
     /// Records whose state was updated by this check (confirmation or
     /// InstantSend lock on a previously stored record), grouped by wallet.
     pub per_wallet_updated_records: BTreeMap<WalletId, Vec<TransactionRecord>>,
+    /// ScriptPubKeys of outputs whose UTXOs were newly inserted by this
+    /// check, grouped by wallet. Fires at most once per output; see
+    /// `TransactionCheckResult::newly_funded_scripts`.
+    pub newly_funded_scripts: BTreeMap<WalletId, Vec<dashcore::ScriptBuf>>,
 }
 
 impl CheckTransactionsResult {
@@ -625,6 +629,13 @@ impl<T: WalletInfoInterface + Send + Sync + 'static> WalletManager<T> {
                             .entry(*wallet_id)
                             .or_default()
                             .extend(check_result.updated_records);
+                    }
+                    if !check_result.newly_funded_scripts.is_empty() {
+                        result
+                            .newly_funded_scripts
+                            .entry(*wallet_id)
+                            .or_default()
+                            .extend(check_result.newly_funded_scripts);
                     }
                 }
 

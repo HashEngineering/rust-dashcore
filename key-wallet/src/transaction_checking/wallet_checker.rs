@@ -168,12 +168,28 @@ impl WalletTransactionChecker for ManagedWalletInfo {
         }
 
         // Process each affected account
+        let txid_for_outpoints = tx.txid();
         for account_match in result.affected_accounts.clone() {
             let Some(mut account) =
                 self.accounts.get_by_account_type_match_mut(&account_match.account_type_match)
             else {
                 continue;
             };
+
+            // Snapshot which of this tx's outputs lack a UTXO in this
+            // account before recording/confirming; whatever appears
+            // afterwards was newly funded by THIS check. For a re-processed
+            // tx that means late output recognition (an address derived
+            // after the tx was first seen) — the loop-safe trigger for
+            // re-matching blocks that spend these outputs.
+            let missing_before: Vec<u32> = (0..tx.output.len() as u32)
+                .filter(|vout| {
+                    !account.has_utxo(&dashcore::OutPoint {
+                        txid: txid_for_outpoints,
+                        vout: *vout,
+                    })
+                })
+                .collect();
 
             if is_new {
                 let record = account.record_transaction_with_observed_spends(
@@ -199,6 +215,18 @@ impl WalletTransactionChecker for ManagedWalletInfo {
                         result.updated_records.push(record);
                     } else {
                         result.new_records.push(record);
+                    }
+                }
+            }
+
+            for vout in missing_before {
+                let outpoint = dashcore::OutPoint {
+                    txid: txid_for_outpoints,
+                    vout,
+                };
+                if account.has_utxo(&outpoint) {
+                    if let Some(output) = tx.output.get(vout as usize) {
+                        result.newly_funded_scripts.push(output.script_pubkey.clone());
                     }
                 }
             }

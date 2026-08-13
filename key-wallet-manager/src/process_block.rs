@@ -97,27 +97,20 @@ impl<T: WalletInfoInterface + Send + Sync + 'static> WalletInterface for WalletM
                 result.new_scripts.entry(wallet_id).or_default().extend(scripts);
                 per_wallet_derived.entry(wallet_id).or_default().extend(derived);
             }
-            for (wallet_id, records) in check_result.per_wallet_new_records {
+            for (wallet_id, funded) in check_result.newly_funded_scripts {
                 let backfill = frontier_heights
                     .get(&wallet_id)
                     .is_some_and(|&frontier| height < frontier);
-                if backfill {
-                    let funded: Vec<ScriptBuf> = records
-                        .iter()
-                        .flat_map(|record| {
-                            record.output_details.iter().filter_map(|detail| {
-                                record
-                                    .transaction
-                                    .output
-                                    .get(detail.index as usize)
-                                    .map(|out| out.script_pubkey.clone())
-                            })
-                        })
-                        .collect();
-                    if !funded.is_empty() {
-                        result.new_scripts.entry(wallet_id).or_default().extend(funded);
-                    }
+                if backfill && !funded.is_empty() {
+                    tracing::info!(
+                        "Backfill block {} funded {} late-recognized outputs; queueing scripts for respend re-match",
+                        height,
+                        funded.len(),
+                    );
+                    result.new_scripts.entry(wallet_id).or_default().extend(funded);
                 }
+            }
+            for (wallet_id, records) in check_result.per_wallet_new_records {
                 per_wallet_inserted.entry(wallet_id).or_default().extend(records);
             }
             for (wallet_id, records) in check_result.per_wallet_updated_records {
