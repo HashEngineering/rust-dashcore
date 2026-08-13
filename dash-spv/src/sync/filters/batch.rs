@@ -54,6 +54,12 @@ pub(super) struct FiltersBatch {
     /// `collected_scripts`, so "no collected scripts left" alone does not
     /// prove this batch has nothing more to match.
     full_match_generation: u64,
+    /// Scripts already forward-rescanned but still awaiting the one combined
+    /// backward sweep over the committed range (#846). Accumulated across
+    /// fixpoint rounds so each script crosses the stored history exactly
+    /// once, instead of the whole history being reloaded per derivation
+    /// round.
+    backward_scripts: HashMap<WalletId, HashSet<ScriptBuf>>,
 }
 
 impl FiltersBatch {
@@ -75,6 +81,7 @@ impl FiltersBatch {
             collected_scripts: HashMap::new(),
             matched_wallets: BTreeSet::new(),
             full_match_generation: 0,
+            backward_scripts: HashMap::new(),
         }
     }
     /// Start height of this batch (inclusive).
@@ -167,6 +174,21 @@ impl FiltersBatch {
     /// with its `account_generation` snapshot.
     pub(super) fn set_scanned_wallets(&mut self, wallets: BTreeMap<WalletId, u64>) {
         self.scanned_wallets = wallets;
+    }
+    /// Queue already forward-rescanned scripts for the deferred backward
+    /// sweep over the committed range.
+    pub(super) fn accumulate_backward_scripts(
+        &mut self,
+        scripts: HashMap<WalletId, HashSet<ScriptBuf>>,
+    ) {
+        for (wallet_id, scripts) in scripts {
+            self.backward_scripts.entry(wallet_id).or_default().extend(scripts);
+        }
+    }
+    /// Take the scripts accumulated for the backward sweep, leaving the map
+    /// empty.
+    pub(super) fn take_backward_scripts(&mut self) -> HashMap<WalletId, HashSet<ScriptBuf>> {
+        std::mem::take(&mut self.backward_scripts)
     }
     /// Wallets that were behind at scan time (with their generation snapshot)
     /// and must have their synced_height advanced when this batch commits.
