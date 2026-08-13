@@ -768,6 +768,28 @@ impl<H: BlockHeaderStorage, FH: FilterHeaderStorage, F: FilterStorage, W: Wallet
                     break;
                 }
 
+                // The ladder accumulates its derived scripts for the
+                // committed-range sweep, and the pre-probe sweep has already
+                // run — so drain them here before the batch seals. Pools
+                // only grow, so a re-probe of the same rung derives nothing
+                // and this converges.
+                let probe_backward = self
+                    .active_batches
+                    .get_mut(&batch_start)
+                    .map(|b| b.take_backward_scripts())
+                    .unwrap_or_default();
+                if !probe_backward.is_empty() {
+                    events
+                        .extend(self.rescan_committed_range(batch_start, &probe_backward).await?);
+                    if let Some(batch) = self.active_batches.get(&batch_start) {
+                        if batch.pending_blocks() > 0 {
+                            // The sweep found blocks below the committed
+                            // boundary; the chase resumes.
+                            break;
+                        }
+                    }
+                }
+
                 // Mark rescan as complete
                 if let Some(batch) = self.active_batches.get_mut(&batch_start) {
                     batch.mark_rescan_complete();
@@ -909,6 +931,19 @@ impl<H: BlockHeaderStorage, FH: FilterHeaderStorage, F: FilterStorage, W: Wallet
                 let mut probe_events = Vec::new();
                 for start in &rescan_targets {
                     probe_events.extend(self.rescan_batch(*start, &scripts_by_wallet).await?);
+                }
+                // Probe-derived scripts never pass through `BlockProcessed`,
+                // so they miss the backward accumulation that block-derived
+                // scripts get — but a probed index may have been paid inside
+                // an already-committed range (#846: e.g. a deep CoinJoin
+                // collateral funded while its index was beyond every window).
+                // Queue them for the committed-range sweep that runs before
+                // this batch can seal.
+                if let Some(batch) = self.active_batches.get_mut(&batch_start) {
+                    batch.accumulate_backward_scripts(HashMap::from([(
+                        wallet_id,
+                        new_scripts.iter().cloned().collect(),
+                    )]));
                 }
                 let blocks_found: usize = probe_events
                     .iter()
