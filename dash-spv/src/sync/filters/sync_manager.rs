@@ -7,7 +7,9 @@ use crate::sync::{
 };
 use async_trait::async_trait;
 use dashcore::network::message::NetworkMessage;
-use key_wallet_manager::WalletInterface;
+use dashcore::ScriptBuf;
+use key_wallet_manager::{WalletId, WalletInterface};
+use std::collections::{HashMap, HashSet};
 
 #[async_trait]
 impl<
@@ -212,7 +214,8 @@ impl<
                 }
 
                 // Check if this block is part of our tracked blocks
-                if let Some((_, batch_start)) = self.tracker.finish_in_flight(block_hash) {
+                let tracked = self.tracker.finish_in_flight(block_hash);
+                if let Some((_, batch_start)) = tracked {
                     if let Some(batch) = self.active_batches.get_mut(&batch_start) {
                         batch.decrement_pending_blocks();
                         tracing::debug!(
@@ -223,19 +226,57 @@ impl<
                             batch.pending_blocks()
                         );
                     }
+                }
 
-                    // Collect per-wallet new scripts for deferred rescan at commit time.
-                    for (wallet_id, scripts) in new_scripts {
-                        if scripts.is_empty() {
-                            continue;
+                // Collect per-wallet new scripts for deferred rescan at
+                // commit time. Never drop them: if the tracked batch already
+                // committed (commit racing the processing pipeline at the
+                // end-of-sync cascade), or the block wasn't tracked at all (a
+                // duplicate delivery, or a tip/mempool-path block), route the
+                // scripts to the lowest active batch so the drain still
+                // rescans and sweeps them. Dropping here is what let
+                // end-of-cascade derivations (deep CoinJoin indices reached
+                // in the final seconds) vanish without ever being matched.
+                if new_scripts.values().any(|s| !s.is_empty()) {
+                    let target = tracked
+                        .map(|(_, b)| b)
+                        .filter(|b| self.active_batches.contains_key(b))
+                        .or_else(|| self.active_batches.keys().next().copied());
+                    match target {
+                        Some(target_start) => {
+                            for (wallet_id, scripts) in new_scripts {
+                                if scripts.is_empty() {
+                                    continue;
+                                }
+                                if let Some(batch) = self.active_batches.get_mut(&target_start) {
+                                    batch.add_scripts_for_wallet(
+                                        *wallet_id,
+                                        scripts.iter().cloned(),
+                                    );
+                                }
+                            }
                         }
-                        if let Some(batch) = self.active_batches.get_mut(&batch_start) {
-                            batch.add_scripts_for_wallet(*wallet_id, scripts.iter().cloned());
+                        None => {
+                            // No active batches (sync already complete):
+                            // sweep the whole committed range directly. The
+                            // pending accounting no-ops without an owning
+                            // batch, which is acceptable post-completion.
+                            let scripts_map: HashMap<WalletId, HashSet<ScriptBuf>> = new_scripts
+                                .iter()
+                                .filter(|(_, s)| !s.is_empty())
+                                .map(|(id, s)| (*id, s.iter().cloned().collect()))
+                                .collect();
+                            let committed = self.progress.committed_height();
+                            let mut events = self
+                                .rescan_committed_range(committed + 1, &scripts_map)
+                                .await?;
+                            events.extend(self.try_process_batch().await?);
+                            return Ok(events);
                         }
                     }
-
-                    return self.try_process_batch().await;
                 }
+
+                return self.try_process_batch().await;
             }
 
             _ => {}
