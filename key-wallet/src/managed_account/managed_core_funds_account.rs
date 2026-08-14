@@ -674,9 +674,17 @@ impl ManagedCoreFundsAccount {
     ) -> Option<TransactionRecord> {
         let txid = tx.txid();
 
-        // Already finalized via a chainlock: the tx is immutable —
-        // no record update, no UTXO refresh, no event needed.
+        // Already finalized via a chainlock: the tx is immutable — no record
+        // update and no event. But recognition may have WIDENED since
+        // finalization: an output paying an address derived only later (a
+        // deep CoinJoin index reached by a rescan long after the record
+        // finalized and was dropped) was invisible when the UTXOs were last
+        // refreshed. Input matching is keyed by outpoint, so without this
+        // refresh every downstream spend of that output stays unrecognizable
+        // forever. `update_utxos` is idempotent and observed-spent-aware,
+        // making the refresh safe on plain replays.
         if self.keys.transaction_is_finalized(&txid) {
+            self.update_utxos(tx, account_match, context, observed_spent, external_final_parents);
             return None;
         }
 

@@ -87,6 +87,13 @@ pub struct TransactionCheckResult {
     /// replay the dead transaction on the next load and re-create the phantom
     /// balance this removal just cleared.
     pub swept_transactions: Vec<Txid>,
+    /// ScriptPubKeys of outputs whose UTXOs were newly inserted by this
+    /// check. For a re-processed transaction this means late output
+    /// recognition — an address derived only after the tx was first
+    /// processed (deep gap-limit index reached by a rescan). Fires at most
+    /// once per output (the UTXO exists afterwards), making it a loop-safe
+    /// trigger for re-matching blocks that spend these outputs.
+    pub newly_funded_scripts: Vec<ScriptBuf>,
 }
 
 /// Enum representing the type of Core account that matched with embedded data
@@ -417,6 +424,7 @@ impl ManagedAccountCollection {
             new_records: Vec::new(),
             updated_records: Vec::new(),
             swept_transactions: Vec::new(),
+            newly_funded_scripts: Vec::new(),
         };
 
         for account_type in account_types {

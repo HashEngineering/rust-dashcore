@@ -407,6 +407,15 @@ impl<'a> ManagedAccountRefMut<'a> {
 
     /// Mark all UTXOs belonging to `txid` as InstantSend-locked.
     ///
+    /// Whether the account currently holds a UTXO at `outpoint`. Always
+    /// `false` for the [`Keys`](Self::Keys) variant (no UTXOs).
+    pub fn has_utxo(&self, outpoint: &dashcore::OutPoint) -> bool {
+        match self {
+            ManagedAccountRefMut::Funds(a) => a.utxos.contains_key(outpoint),
+            ManagedAccountRefMut::Keys(_) => false,
+        }
+    }
+
     /// Returns `true` if any UTXO was newly marked. Always returns `false`
     /// for the [`Keys`](Self::Keys) variant (no UTXOs to mark).
     pub fn mark_utxos_instant_send(&mut self, txid: &Txid) -> bool {

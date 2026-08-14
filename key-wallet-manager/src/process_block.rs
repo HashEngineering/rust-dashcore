@@ -51,6 +51,25 @@ impl<T: WalletInfoInterface + Send + Sync + 'static> WalletInterface for WalletM
         let mut per_wallet_updated: BTreeMap<WalletId, Vec<TransactionRecord>> = BTreeMap::new();
         let mut per_wallet_derived: BTreeMap<WalletId, Vec<DerivedAddressInfo>> = BTreeMap::new();
 
+        // Backfill detection: a block at or below a wallet's already-processed
+        // frontier is a recovery re-application (a rescan found it after the
+        // forward scan had moved past it). Its newly recognized outputs create
+        // UTXOs on scripts that may have been watched all along — so the
+        // blocks that SPEND those outputs matched their filters (prevout
+        // scripts) when first scanned, were processed, and were dropped
+        // because the outpoints were unknown at the time. Recognition is
+        // keyed by outpoint, not script, so no gap-limit derivation ever
+        // re-arms a rescan for them. Report those output scripts as
+        // `new_scripts`: the rescan machinery re-matches them against active
+        // and committed filters and re-applies the spend blocks, which now
+        // resolve against the extended UTXO set.
+        let frontier_heights: BTreeMap<WalletId, CoreBlockHeight> = wallets
+            .iter()
+            .filter_map(|id| {
+                self.wallet_infos.get(id).map(|info| (*id, info.last_processed_height()))
+            })
+            .collect();
+
         for (position, tx) in block.txdata.iter().enumerate() {
             // Stamp each record with its `block.vtx` index so consumers
             // can replay Core's same-block apply order (e.g. multiple
@@ -77,6 +96,18 @@ impl<T: WalletInfoInterface + Send + Sync + 'static> WalletInterface for WalletM
                     derived.iter().map(|d| d.info.script_pubkey.clone()).collect::<Vec<_>>();
                 result.new_scripts.entry(wallet_id).or_default().extend(scripts);
                 per_wallet_derived.entry(wallet_id).or_default().extend(derived);
+            }
+            for (wallet_id, funded) in check_result.newly_funded_scripts {
+                let backfill =
+                    frontier_heights.get(&wallet_id).is_some_and(|&frontier| height < frontier);
+                if backfill && !funded.is_empty() {
+                    tracing::info!(
+                        "Backfill block {} funded {} late-recognized outputs; queueing scripts for respend re-match",
+                        height,
+                        funded.len(),
+                    );
+                    result.new_scripts.entry(wallet_id).or_default().extend(funded);
+                }
             }
             for (wallet_id, records) in check_result.per_wallet_new_records {
                 per_wallet_inserted.entry(wallet_id).or_default().extend(records);

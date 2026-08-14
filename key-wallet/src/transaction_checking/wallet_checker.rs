@@ -193,12 +193,28 @@ impl WalletTransactionChecker for ManagedWalletInfo {
         }
 
         // Process each affected account
+        let txid_for_outpoints = tx.txid();
         for account_match in result.affected_accounts.clone() {
             let Some(mut account) =
                 self.accounts.get_by_account_type_match_mut(&account_match.account_type_match)
             else {
                 continue;
             };
+
+            // Snapshot which of this tx's outputs lack a UTXO in this
+            // account before recording/confirming; whatever appears
+            // afterwards was newly funded by THIS check. For a re-processed
+            // tx that means late output recognition (an address derived
+            // after the tx was first seen) — the loop-safe trigger for
+            // re-matching blocks that spend these outputs.
+            let missing_before: Vec<u32> = (0..tx.output.len() as u32)
+                .filter(|vout| {
+                    !account.has_utxo(&dashcore::OutPoint {
+                        txid: txid_for_outpoints,
+                        vout: *vout,
+                    })
+                })
+                .collect();
 
             if is_new {
                 let record = account.record_transaction_with_observed_spends(
@@ -226,6 +242,18 @@ impl WalletTransactionChecker for ManagedWalletInfo {
                         result.updated_records.push(record);
                     } else {
                         result.new_records.push(record);
+                    }
+                }
+            }
+
+            for vout in missing_before {
+                let outpoint = dashcore::OutPoint {
+                    txid: txid_for_outpoints,
+                    vout,
+                };
+                if account.has_utxo(&outpoint) {
+                    if let Some(output) = tx.output.get(vout as usize) {
+                        result.newly_funded_scripts.push(output.script_pubkey.clone());
                     }
                 }
             }
@@ -2067,14 +2095,15 @@ mod tests {
         assert_eq!(ctx.managed_wallet.balance.spendable(), change_amount);
     }
 
-    /// The rescan recovery above has a boundary: a funding transaction that
-    /// was chainlock-finalized keeps only its txid, so re-delivering it is not
-    /// a new sighting and never reaches the only production UTXO insert site.
-    /// The coin stays absent. Documented rather than fixed — recovering it
-    /// needs a rescan deep enough to re-fetch the block, which is above this
-    /// layer.
+    /// The rescan recovery above used to have a boundary: a funding
+    /// transaction that was chainlock-finalized keeps only its txid, so
+    /// re-delivering it was not a new sighting and never reached the UTXO
+    /// insert site — the coin stayed absent, documented rather than fixed.
+    /// The finalized gate in `confirm_transaction` now still refreshes UTXOs
+    /// (records stay immutable), so redelivery recovers the coin: the honest
+    /// on-chain state after an abandon released its outpoint.
     #[tokio::test]
-    async fn test_rescan_recovery_does_not_reach_a_finalized_funding_transaction() {
+    async fn test_rescan_recovery_reaches_a_finalized_funding_transaction() {
         let mut ctx = TestWalletContext::new_random();
         let external_address = Address::p2pkh(
             &dashcore::PublicKey::from_slice(&[0x02; 33]).expect("pubkey"),
@@ -2124,13 +2153,14 @@ mod tests {
         ctx.managed_wallet.abandon_transaction(spend.txid());
         ctx.managed_wallet.update_balance();
 
-        // Re-delivering the funding block does not bring the coin back.
+        // Re-delivering the funding block brings the coin back: the record
+        // is immutable, but the UTXO refresh runs even for finalized txids.
         ctx.check_transaction(&funding_tx, finalized).await;
         assert_eq!(
             ctx.managed_wallet.balance.confirmed(),
-            0,
-            "a finalized funding record blocks the redelivery path this \
-             recovery depends on"
+            1_000_000,
+            "redelivering a finalized funding transaction must re-insert its \
+             released coin"
         );
     }
 

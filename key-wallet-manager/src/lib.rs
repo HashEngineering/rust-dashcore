@@ -102,6 +102,10 @@ pub struct CheckTransactionsResult {
     /// — a consumer mirroring wallet state must delete these rows, since no
     /// other signal on the bus reports a removal.
     pub per_wallet_swept: BTreeMap<WalletId, Vec<Txid>>,
+    /// ScriptPubKeys of outputs whose UTXOs were newly inserted by this
+    /// check, grouped by wallet. Fires at most once per output; see
+    /// `TransactionCheckResult::newly_funded_scripts`.
+    pub newly_funded_scripts: BTreeMap<WalletId, Vec<dashcore::ScriptBuf>>,
 }
 
 impl CheckTransactionsResult {
@@ -633,6 +637,13 @@ impl<T: WalletInfoInterface + Send + Sync + 'static> WalletManager<T> {
                             .entry(*wallet_id)
                             .or_default()
                             .extend(check_result.updated_records);
+                    }
+                    if !check_result.newly_funded_scripts.is_empty() {
+                        result
+                            .newly_funded_scripts
+                            .entry(*wallet_id)
+                            .or_default()
+                            .extend(check_result.newly_funded_scripts);
                     }
                 }
 
