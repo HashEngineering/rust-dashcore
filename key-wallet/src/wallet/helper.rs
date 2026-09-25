@@ -373,8 +373,6 @@ impl Wallet {
         &self,
         path: &crate::DerivationPath,
     ) -> Result<crate::bip32::ExtendedPrivKey> {
-        use secp256k1::Secp256k1;
-
         let master = match &self.wallet_type {
             WalletType::Mnemonic {
                 root_extended_private_key,
@@ -397,8 +395,7 @@ impl Wallet {
             }
         };
 
-        let secp = Secp256k1::new();
-        master.derive_priv(&secp, path).map_err(|e| e.into())
+        master.derive_priv(path).map_err(|e| e.into())
     }
 
     /// Derive a private key at a specific derivation path
@@ -461,8 +458,6 @@ impl Wallet {
         &self,
         path: &crate::DerivationPath,
     ) -> Result<crate::bip32::ExtendedPubKey> {
-        use secp256k1::Secp256k1;
-
         // Check if the path contains hardened derivation
         let has_hardened = path.into_iter().any(|child| child.is_hardened());
 
@@ -476,8 +471,7 @@ impl Wallet {
             // For hardened paths, derive the extended private key first, then get extended public key
             let extended_private = self.derive_extended_private_key(path)?;
             use crate::bip32::ExtendedPubKey;
-            let secp = Secp256k1::new();
-            Ok(ExtendedPubKey::from_priv(&secp, &extended_private))
+            Ok(ExtendedPubKey::from_priv(&extended_private))
         } else {
             // For non-hardened paths, derive from the root public key. Watch-only and
             // external-signable unit variants have no root key on hand — surface a
@@ -491,9 +485,8 @@ impl Wallet {
                         .to_string(),
                 )
             })?;
-            let secp = Secp256k1::new();
             let xpub = root_xpub.to_extended_pub_key(self.network);
-            xpub.derive_pub(&secp, path).map_err(|e| e.into())
+            xpub.derive_pub(path).map_err(|e| e.into())
         }
     }
 
@@ -522,9 +515,8 @@ impl Wallet {
         if has_hardened {
             // For hardened paths, derive the private key first, then get public key
             let private_key = self.derive_private_key(path)?;
-            use secp256k1::Secp256k1;
-            let secp = Secp256k1::new();
-            Ok(secp256k1::PublicKey::from_secret_key(&secp, &private_key))
+
+            Ok(secp256k1::PublicKey::from_secret_key(&private_key))
         } else {
             // For non-hardened paths, derive directly from public key
             let extended = self.derive_extended_public_key(path)?;
@@ -618,35 +610,36 @@ impl Wallet {
     }
 
     /// Get a [`crate::KeySource`] capable of public (watch-side) derivation
-    /// for a specific account type.
+    /// for a specific account.
     ///
-    /// This is the key-source counterpart of
-    /// [`Self::extended_public_key_for_account_type`]: ECDSA accounts yield
-    /// [`crate::KeySource::Public`], while the BLS provider operator account
-    /// yields [`crate::KeySource::BLSPublic`] (legacy-scheme non-hardened
-    /// derivation) so gap-limit maintenance can extend the operator key pool
-    /// just like the owner/voting pools.
+    /// Takes the fully-keyed [`crate::account::AccountType`] rather than an
+    /// [`crate::transaction_checking::transaction_router::AccountTypeToCheck`],
+    /// so accounts identified by more than an index — the Dashpay contact
+    /// chains, keyed by the friendship's two identity ids — resolve as well.
+    /// ECDSA accounts yield [`crate::KeySource::Public`], while the BLS
+    /// provider operator account yields [`crate::KeySource::BLSPublic`]
+    /// (legacy-scheme non-hardened derivation) so gap-limit maintenance can
+    /// extend the operator key pool just like the owner/voting pools.
     ///
-    /// Returns [`crate::KeySource::NoKeySource`] for account types that
-    /// cannot derive publicly: the Ed25519 platform node account (SLIP-0010
-    /// supports hardened derivation only) and Dashpay accounts (not
-    /// retrieved via this helper).
-    pub fn key_source_for_account_type(
+    /// Returns [`crate::KeySource::NoKeySource`] for the Ed25519 platform node
+    /// account, which cannot derive publicly (SLIP-0010 supports hardened
+    /// derivation only), and for accounts the wallet does not hold.
+    pub fn key_source_for_account(
         &self,
-        account_type: &crate::transaction_checking::transaction_router::AccountTypeToCheck,
-        account_index: Option<u32>,
+        account_type: crate::account::AccountType,
     ) -> crate::KeySource {
         match account_type {
             #[cfg(feature = "bls")]
-            crate::transaction_checking::transaction_router::AccountTypeToCheck::ProviderOperatorKeys => self
+            crate::account::AccountType::ProviderOperatorKeys => self
                 .accounts
                 .provider_operator_keys
                 .as_ref()
                 .map(|a| crate::KeySource::BLSPublic(a.bls_public_key.clone()))
                 .unwrap_or(crate::KeySource::NoKeySource),
             _ => self
-                .extended_public_key_for_account_type(account_type, account_index)
-                .map(crate::KeySource::Public)
+                .accounts
+                .account_of_type(account_type)
+                .map(|a| crate::KeySource::Public(a.account_xpub))
                 .unwrap_or(crate::KeySource::NoKeySource),
         }
     }

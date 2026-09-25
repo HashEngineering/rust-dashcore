@@ -1,12 +1,11 @@
 // Written in 2014 by Andrew Poelstra <apoelstra@wpsoftware.net>
 // SPDX-License-Identifier: CC0-1.0
 
-use core::convert::{TryFrom, TryInto};
+use core::convert::TryFrom;
 use core::fmt;
 use core::ops::{Index, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
 
 use hashes::Hash;
-use secp256k1::{Secp256k1, Verification};
 
 use crate::address::WitnessVersion;
 use crate::blockdata::opcodes::all::*;
@@ -178,14 +177,10 @@ impl Script {
     /// Computes P2TR output with a given internal key and a single script spending path equal to
     /// the current script, assuming that the script is a Tapscript.
     #[inline]
-    pub fn to_v1_p2tr<C: Verification>(
-        &self,
-        secp: &Secp256k1<C>,
-        internal_key: UntweakedPublicKey,
-    ) -> ScriptBuf {
+    pub fn to_v1_p2tr(&self, internal_key: UntweakedPublicKey) -> ScriptBuf {
         let leaf_hash = self.tapscript_leaf_hash();
         let merkle_root = TapNodeHash::from(leaf_hash);
-        ScriptBuf::new_v1_p2tr(secp, internal_key, Some(merkle_root))
+        ScriptBuf::new_v1_p2tr(internal_key, Some(merkle_root))
     }
 
     /// Returns witness version of the script, if any, assuming the script is a `scriptPubkey`.
@@ -291,15 +286,6 @@ impl Script {
         self.0.len() == 22
             && self.witness_version() == Some(WitnessVersion::V0)
             && self.0[1] == OP_PUSHBYTES_20.to_u8()
-    }
-
-    /// Returns P2WPKH byte slice if this script is P2WPKH, otherwise None.
-    pub fn v0_p2wpkh(&self) -> Option<&[u8; 20]> {
-        if self.is_v0_p2wpkh() {
-            Some(self.0[2..].try_into().expect("is_v0_p2wpkh checks the length"))
-        } else {
-            None
-        }
     }
 
     /// Checks whether a script pubkey is a P2TR output.

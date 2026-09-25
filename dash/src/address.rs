@@ -24,11 +24,10 @@
 //! ```rust
 //! # #[cfg(feature = "rand-std")] {
 //! use dashcore::{Address, PublicKey, Network};
-//! use dashcore::secp256k1::{rand, Secp256k1};
+//! use dashcore::secp256k1::{self, rand};
 //!
 //! // Generate random key pair.
-//! let s = Secp256k1::new();
-//! let public_key = PublicKey::new(s.generate_keypair(&mut rand::thread_rng()).1);
+//! let public_key = PublicKey::new(secp256k1::generate_keypair(&mut rand::rng()).1);
 //!
 //! // Generate pay-to-pubkey-hash address.
 //! let address = Address::p2pkh(&public_key, Network::Mainnet);
@@ -46,6 +45,13 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::str::FromStr;
 
+use bech32;
+use hashes::{Hash, HashEngine, sha256};
+use internals::write_err;
+use secp256k1::XOnlyPublicKey;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use crate::base58;
 use crate::blockdata::constants::{
     MAX_SCRIPT_ELEMENT_SIZE, PUBKEY_ADDRESS_PREFIX_MAIN, PUBKEY_ADDRESS_PREFIX_TEST,
@@ -56,18 +62,12 @@ use crate::blockdata::opcodes::all::*;
 use crate::blockdata::script::{
     self, Instruction, PushBytes, PushBytesBuf, PushBytesErrorReport, Script, ScriptBuf,
 };
-use crate::crypto::key::{PublicKey, TapTweak, TweakedPublicKey, UntweakedPublicKey};
+use crate::crypto::key::{PublicKey, TweakedPublicKey, UntweakedPublicKey};
 use crate::error::ParseIntError;
 use crate::hash_types::{PubkeyHash, ScriptHash};
 use crate::network::constants::Network;
 use crate::prelude::*;
-use crate::taproot::TapNodeHash;
-use bech32;
-use hashes::{Hash, HashEngine, sha256};
-use internals::write_err;
-use secp256k1::{Secp256k1, Verification, XOnlyPublicKey};
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
+use crate::taproot::{TapNodeHash, TapTweak};
 
 /// Address error.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -75,6 +75,10 @@ use serde::{Deserialize, Serialize};
 pub enum Error {
     /// Base58 encoding error.
     Base58(base58::Error),
+    /// The address version byte was not one we recognise.
+    InvalidAddressVersion(u8),
+    /// The base58 decoded correctly but the payload was the wrong length.
+    InvalidBase58PayloadLength(usize),
     /// Bech32 encoding error.
     Bech32(bech32::Error),
     /// The bech32 payload was empty.
@@ -117,6 +121,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Error::Base58(ref e) => write_err!(f, "base58 address encoding error"; e),
+            Error::InvalidAddressVersion(ref v) => {
+                write!(f, "address version {} is invalid for this base58 type", v)
+            }
+            Error::InvalidBase58PayloadLength(ref l) => {
+                write!(f, "length {} invalid for this base58 type", l)
+            }
             Error::Bech32(ref e) => write_err!(f, "bech32 address encoding error"; e),
             Error::EmptyBech32Payload => write!(f, "the bech32 payload was empty"),
             Error::InvalidBech32Variant { expected, found } => write!(f, "invalid bech32 checksum variant found {:?} when {:?} was expected", found, expected),
@@ -146,7 +156,9 @@ impl std::error::Error for Error {
             Base58(e) => Some(e),
             Bech32(e) => Some(e),
             UnparsableWitnessVersion(e) => Some(e),
-            EmptyBech32Payload
+            InvalidAddressVersion(_)
+            | InvalidBase58PayloadLength(_)
+            | EmptyBech32Payload
             | InvalidBech32Variant {
                 ..
             }
@@ -585,13 +597,9 @@ impl Payload {
     }
 
     /// Create a pay to taproot payload from untweaked key
-    pub fn p2tr<C: Verification>(
-        secp: &Secp256k1<C>,
-        internal_key: UntweakedPublicKey,
-        merkle_root: Option<TapNodeHash>,
-    ) -> Payload {
-        let (output_key, _parity) = internal_key.tap_tweak(secp, merkle_root);
-        let prog = WitnessProgram::new(WitnessVersion::V1, output_key.to_inner().serialize())
+    pub fn p2tr(internal_key: UntweakedPublicKey, merkle_root: Option<TapNodeHash>) -> Payload {
+        let (output_key, _parity) = internal_key.tap_tweak(merkle_root);
+        let prog = WitnessProgram::new(WitnessVersion::V1, output_key.to_inner().to_byte_array())
             .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)
     }
@@ -600,7 +608,7 @@ impl Payload {
     ///
     /// This method is not recommended for use and [Payload::p2tr()] should be used where possible.
     pub fn p2tr_tweaked(output_key: TweakedPublicKey) -> Payload {
-        let prog = WitnessProgram::new(WitnessVersion::V1, output_key.to_inner().serialize())
+        let prog = WitnessProgram::new(WitnessVersion::V1, output_key.to_inner().to_byte_array())
             .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)
     }
@@ -1111,13 +1119,12 @@ impl Address {
     }
 
     /// Creates a pay to taproot address from an untweaked key.
-    pub fn p2tr<C: Verification>(
-        secp: &Secp256k1<C>,
+    pub fn p2tr(
         internal_key: UntweakedPublicKey,
         merkle_root: Option<TapNodeHash>,
         network: Network,
     ) -> Address {
-        Address::new(network, Payload::p2tr(secp, internal_key, merkle_root))
+        Address::new(network, Payload::p2tr(internal_key, merkle_root))
     }
 
     /// Creates a pay to taproot address from a pre-tweaked output key.
@@ -1220,7 +1227,7 @@ impl Address {
         let xonly_pubkey = XOnlyPublicKey::from(pubkey.inner);
 
         (*pubkey_hash.as_byte_array() == *payload)
-            || (xonly_pubkey.serialize() == *payload)
+            || (xonly_pubkey.to_byte_array() == *payload)
             || (*segwit_redeem_hash(&pubkey_hash).as_byte_array() == *payload)
     }
 
@@ -1230,7 +1237,7 @@ impl Address {
     /// assumed to have already been tweaked.
     pub fn is_related_to_xonly_pubkey(&self, xonly_pubkey: &XOnlyPublicKey) -> bool {
         let payload = self.payload().inner_prog_as_bytes();
-        payload == xonly_pubkey.serialize()
+        payload == xonly_pubkey.to_byte_array()
     }
 
     /// Returns true if the address creates a particular script
@@ -1386,11 +1393,11 @@ impl FromStr for Address<NetworkUnchecked> {
 
         // Base58
         if s.len() > 50 {
-            return Err(Error::Base58(base58::Error::InvalidLength(s.len() * 11 / 15)));
+            return Err(Error::InvalidBase58PayloadLength(s.len() * 11 / 15));
         }
         let data = base58::decode_check(s)?;
         if data.len() != 21 {
-            return Err(Error::Base58(base58::Error::InvalidLength(data.len())));
+            return Err(Error::InvalidBase58PayloadLength(data.len()));
         }
 
         let (network, payload) = match data[0] {
@@ -1406,7 +1413,7 @@ impl FromStr for Address<NetworkUnchecked> {
             SCRIPT_ADDRESS_PREFIX_TEST => {
                 (Network::Testnet, Payload::ScriptHash(ScriptHash::from_slice(&data[1..]).unwrap()))
             }
-            x => return Err(Error::Base58(base58::Error::InvalidAddressVersion(x))),
+            x => return Err(Error::InvalidAddressVersion(x)),
         };
 
         Ok(Address::new(network, payload))
@@ -1942,8 +1949,7 @@ mod tests {
             "cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115",
         )
         .unwrap();
-        let secp = Secp256k1::verification_only();
-        let address = Address::p2tr(&secp, internal_key, None, Network::Mainnet);
+        let address = Address::p2tr(internal_key, None, Network::Mainnet);
         assert_eq!(
             address.to_string(),
             "ds1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqq9xzlq"

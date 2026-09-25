@@ -7,16 +7,15 @@ use core::ops::Deref;
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
 use hashes::hex;
-use secp256k1::{Secp256k1, Verification};
 
 use crate::address::{WitnessProgram, WitnessVersion};
 use crate::blockdata::opcodes::all::*;
 use crate::blockdata::opcodes::{self};
 use crate::blockdata::script::{Builder, Instruction, PushBytes, Script, opcode_to_verify};
 use crate::hash_types::{PubkeyHash, ScriptHash, WPubkeyHash, WScriptHash};
-use crate::key::{PublicKey, TapTweak, TweakedPublicKey, UntweakedPublicKey};
+use crate::key::{PublicKey, TweakedPublicKey, UntweakedPublicKey};
 use crate::prelude::*;
-use crate::taproot::TapNodeHash;
+use crate::taproot::{TapNodeHash, TapTweak};
 
 /// An owned, growable script.
 ///
@@ -127,12 +126,8 @@ impl ScriptBuf {
 
     /// Generates P2TR for script spending path using an internal public key and some optional
     /// script tree merkle root.
-    pub fn new_v1_p2tr<C: Verification>(
-        secp: &Secp256k1<C>,
-        internal_key: UntweakedPublicKey,
-        merkle_root: Option<TapNodeHash>,
-    ) -> Self {
-        let (output_key, _) = internal_key.tap_tweak(secp, merkle_root);
+    pub fn new_v1_p2tr(internal_key: UntweakedPublicKey, merkle_root: Option<TapNodeHash>) -> Self {
+        let (output_key, _) = internal_key.tap_tweak(merkle_root);
         // output key is 32 bytes long, so it's safe to use `new_witness_program_unchecked` (Segwitv1)
         ScriptBuf::new_witness_program_unchecked(WitnessVersion::V1, output_key.serialize())
     }
@@ -197,23 +192,6 @@ impl ScriptBuf {
     /// Computes the P2SH output corresponding to this redeem script.
     pub fn to_p2sh(&self) -> ScriptBuf {
         ScriptBuf::new_p2sh(&self.script_hash())
-    }
-
-    /// Returns the script code used for spending a P2WPKH output if this script is a script pubkey
-    /// for a P2WPKH output. The `scriptCode` is described in [BIP143].
-    ///
-    /// [BIP143]: <https://github.com/bitcoin/bips/blob/99701f68a88ce33b2d0838eb84e115cef505b4c2/bip-0143.mediawiki>
-    pub fn p2wpkh_script_code(&self) -> Option<ScriptBuf> {
-        self.v0_p2wpkh().map(|wpkh| {
-            Builder::new()
-                .push_opcode(OP_DUP)
-                .push_opcode(OP_HASH160)
-                // The `self` script is 0x00, 0x14, <pubkey_hash>
-                .push_slice(wpkh)
-                .push_opcode(OP_EQUALVERIFY)
-                .push_opcode(OP_CHECKSIG)
-                .into_script()
-        })
     }
 
     /// Adds a single opcode to the script.

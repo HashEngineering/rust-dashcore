@@ -20,7 +20,7 @@ use dashcore::Address;
 use dashcore::{Network, TxIn, TxOut};
 use dashcore_hashes::Hash;
 use secp256k1::ecdsa::Signature;
-use secp256k1::{Message, PublicKey, Secp256k1};
+use secp256k1::{Message, PublicKey};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -157,6 +157,11 @@ impl TransactionBuilder {
     /// must therefore not be held across an `await` between `add_funding` and
     /// `build_signed` or `assemble_unsigned`, since suspending there reopens the
     /// read-then-reserve window for a concurrent build.
+    ///
+    /// A change address already set by [`set_change_address`](Self::set_change_address)
+    /// wins: the funding account is only asked for one when the builder has none.
+    /// Deriving unconditionally would both discard the caller's choice and burn a
+    /// pool address, since `next_change_address` advances the pool state.
     pub fn add_funding(self, funds_acc: &mut ManagedCoreFundsAccount, acc: &Account) -> Self {
         self.fund_from(funds_acc, acc, true)
     }
@@ -1050,20 +1055,18 @@ impl TransactionSigner for Wallet {
         sighash: LegacySighash,
         path: DerivationPath,
     ) -> Result<(Signature, PublicKey), BuilderError> {
-        let secp = Secp256k1::new();
-
         let root_xpriv =
             self.root_extended_priv_key().map_err(|_| BuilderError::WatchOnlyWallet)?;
 
         let root_ext_priv = root_xpriv.to_extended_priv_key(self.network);
-        let derived_xpriv = root_ext_priv.derive_priv(&secp, &path).map_err(|e| {
+        let derived_xpriv = root_ext_priv.derive_priv(&path).map_err(|e| {
             BuilderError::SigningFailed(format!("couldn't derive extended priv key: {}", e))
         })?;
         let key = derived_xpriv.private_key;
 
         let message = Message::from_digest(*sighash.as_byte_array());
-        let signature = secp.sign_ecdsa(&message, &key);
-        let pubkey = PublicKey::from_secret_key(&secp, &key);
+        let signature = key.sign_ecdsa(message);
+        let pubkey = PublicKey::from_secret_key(&key);
 
         Ok((signature, pubkey))
     }
@@ -2023,12 +2026,29 @@ mod tests {
 
         funds.reservations().reserve(&[reserved.outpoint], 200, ReservationToken::next());
 
-        let builder =
-            TransactionBuilder::new().set_current_height(200).add_funding(&mut funds, &account);
+        // Set change address to test the branch that avoids it being replaced
+        // by add_funding()
+        let explicit = Address::dummy(Network::Testnet, 1);
+        let builder = TransactionBuilder::new()
+            .set_current_height(200)
+            .set_change_address(explicit.clone())
+            .add_funding(&mut funds, &account);
 
         let candidates: Vec<OutPoint> = builder.inputs.iter().map(|utxo| utxo.outpoint).collect();
         assert!(!candidates.contains(&reserved.outpoint));
         assert!(candidates.contains(&free.outpoint));
+
+        assert_eq!(
+            builder.change_addr.as_ref(),
+            Some(&explicit),
+            "funding must not override a change address the caller chose"
+        );
+        // Nor may it burn a pool address to derive one it then discards.
+        let mut control = ManagedCoreFundsAccount::dummy_bip44();
+        assert_eq!(
+            funds.next_change_address(Some(&account.account_xpub), true).expect("change address"),
+            control.next_change_address(Some(&account.account_xpub), true).expect("change address"),
+        );
     }
 
     #[test]

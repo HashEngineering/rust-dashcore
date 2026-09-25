@@ -123,6 +123,8 @@ fn test_provider_registration_routing() {
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP44));
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP32));
     assert!(accounts.contains(&AccountTypeToCheck::CoinJoin));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayReceivingFunds));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayExternalAccount));
 }
 
 #[tokio::test]
@@ -209,7 +211,7 @@ async fn test_provider_registration_transaction_routing_check_owner_only() {
                     .payload()
                     .as_pubkey_hash()
                     .expect("Owner address should be P2PKH"),
-                operator_public_key: operator_public_key.0.to_compressed().into(),
+                operator_public_key,
                 voting_key_hash: *voting_address
                     .payload()
                     .as_pubkey_hash()
@@ -344,7 +346,7 @@ async fn test_provider_registration_transaction_routing_check_voting_only() {
                     .payload()
                     .as_pubkey_hash()
                     .expect("Owner address should be P2PKH"),
-                operator_public_key: operator_public_key.0.to_compressed().into(),
+                operator_public_key,
                 voting_key_hash: *voting_address
                     .payload()
                     .as_pubkey_hash()
@@ -480,7 +482,7 @@ async fn test_provider_registration_transaction_routing_check_operator_only() {
                     .payload()
                     .as_pubkey_hash()
                     .expect("Owner address should be P2PKH"),
-                operator_public_key: operator_public_key.0.to_compressed().into(),
+                operator_public_key,
                 voting_key_hash: *voting_address
                     .payload()
                     .as_pubkey_hash()
@@ -543,6 +545,8 @@ fn test_provider_update_service_routing() {
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP44));
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP32));
     assert!(accounts.contains(&AccountTypeToCheck::CoinJoin));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayReceivingFunds));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayExternalAccount));
 }
 
 #[test]
@@ -557,6 +561,8 @@ fn test_provider_update_registrar_routing() {
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP44));
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP32));
     assert!(accounts.contains(&AccountTypeToCheck::CoinJoin));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayReceivingFunds));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayExternalAccount));
 }
 
 #[test]
@@ -569,6 +575,8 @@ fn test_provider_update_revocation_routing() {
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP44));
     assert!(accounts.contains(&AccountTypeToCheck::StandardBIP32));
     assert!(accounts.contains(&AccountTypeToCheck::CoinJoin));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayReceivingFunds));
+    assert!(accounts.contains(&AccountTypeToCheck::DashpayExternalAccount));
     // Should NOT check provider-specific keys for revocation
     assert!(!accounts.contains(&AccountTypeToCheck::ProviderOwnerKeys));
     assert!(!accounts.contains(&AccountTypeToCheck::ProviderOperatorKeys));
@@ -678,7 +686,7 @@ async fn test_provider_registration_transaction_routing_check_platform_only() {
                     .payload()
                     .as_pubkey_hash()
                     .expect("Owner address should be P2PKH"),
-                operator_public_key: operator_public_key.0.to_compressed().into(),
+                operator_public_key,
                 voting_key_hash: *voting_address
                     .payload()
                     .as_pubkey_hash()
@@ -812,7 +820,7 @@ async fn test_provider_update_registrar_with_voting_and_operator() {
         version: 1,
         pro_tx_hash: Txid::from_byte_array([1u8; 32]),
         provider_mode: 0,
-        operator_public_key: operator_public_key.0.to_compressed().into(),
+        operator_public_key,
         voting_key_hash: *voting_address
             .payload()
             .as_pubkey_hash()
