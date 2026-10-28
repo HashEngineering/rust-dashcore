@@ -30,6 +30,8 @@ mod performance_tests;
 
 mod provider_key_derivation_tests;
 
+mod restored_txids_tests;
+
 mod special_transaction_matching_tests;
 
 mod special_transaction_tests;

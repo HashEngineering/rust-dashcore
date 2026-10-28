@@ -128,6 +128,11 @@ pub struct ManagedWalletInfo {
     /// each load.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) spent_claims: BTreeMap<OutPoint, Option<Txid>>,
+    /// Transactions an earlier session recorded in a block, set by
+    /// [`Self::restore_known_txids`]. A confirmed re-delivery of one records
+    /// nothing. Not serialized: the host restores it after each load.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) restored_txids: HashSet<Txid>,
     /// Generation counter for the wallet's account set, bumped every time an
     /// account is added to a live wallet (see
     /// [`Self::rewind_sync_checkpoint_for_new_account`]).
@@ -253,6 +258,7 @@ impl ManagedWalletInfo {
             instant_send_locks: HashSet::new(),
             observed_spent_outpoints: BTreeMap::new(),
             spent_claims: BTreeMap::new(),
+            restored_txids: HashSet::new(),
             account_generation: 0,
             noted_chain_lock_height: None,
         }
@@ -271,6 +277,7 @@ impl ManagedWalletInfo {
             instant_send_locks: HashSet::new(),
             observed_spent_outpoints: BTreeMap::new(),
             spent_claims: BTreeMap::new(),
+            restored_txids: HashSet::new(),
             account_generation: 0,
             noted_chain_lock_height: None,
         }
@@ -299,6 +306,7 @@ impl ManagedWalletInfo {
             instant_send_locks: HashSet::new(),
             observed_spent_outpoints: BTreeMap::new(),
             spent_claims: BTreeMap::new(),
+            restored_txids: HashSet::new(),
             account_generation: 0,
             noted_chain_lock_height: None,
         }
@@ -338,6 +346,29 @@ impl ManagedWalletInfo {
     /// invariants; exposed for diagnostics and tests.
     pub fn observed_spent_outpoints(&self) -> &BTreeMap<OutPoint, CoreBlockHeight> {
         &self.observed_spent_outpoints
+    }
+
+    /// Mark transactions an earlier session already recorded in a block.
+    ///
+    /// For a wallet loaded without its transaction records. Such a wallet
+    /// holds no record for any of its history, so a rescan that replays an
+    /// already-scanned block would record each transaction again as new,
+    /// rebuilding its accounting from today's `utxos`: a spend whose coin
+    /// was funded below the replay start finds no input, and its record
+    /// carries the change output alone. A restored txid delivered in a
+    /// block records nothing, adds no UTXO and emits no record; its
+    /// addresses are still marked used and the gap limits maintained.
+    ///
+    /// **When to call:** once after each load, with the txids the host holds
+    /// as mined. Leave out transactions the host holds as unconfirmed: their
+    /// confirmation must still be recorded.
+    ///
+    /// **Limits:** an account that first matches a restored transaction
+    /// after the load — an account added later — does not record its share
+    /// of it. A restored transaction that a fork moved to another block is
+    /// not recorded at its new height.
+    pub fn restore_known_txids(&mut self, txids: impl IntoIterator<Item = Txid>) {
+        self.restored_txids.extend(txids);
     }
 
     /// Guard externally persisted spent outpoints against being credited.

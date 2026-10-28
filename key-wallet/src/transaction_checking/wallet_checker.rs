@@ -294,7 +294,13 @@ impl WalletTransactionChecker for ManagedWalletInfo {
         let external_final_parents = self.accounts.final_parents_of(tx);
 
         let txid = tx.txid();
-        let is_new = !self.accounts.all_accounts().into_iter().any(|a| a.has_transaction(&txid));
+        // Recorded in a block by an earlier session (`restore_known_txids`).
+        // This process holds no record of it, and recording it again would
+        // rebuild its accounting from today's UTXOs, where the coins it spent
+        // are gone.
+        let restored = context.confirmed() && self.restored_txids.contains(&txid);
+        let is_new = !restored
+            && !self.accounts.all_accounts().into_iter().any(|a| a.has_transaction(&txid));
         result.is_new_transaction = is_new;
 
         if !is_new {
@@ -377,7 +383,9 @@ impl WalletTransactionChecker for ManagedWalletInfo {
                 continue;
             };
 
-            if is_new {
+            if restored {
+                // Address bookkeeping only, below.
+            } else if is_new {
                 let record = account.record_transaction_with_observed_spends(
                     tx,
                     &account_match,
